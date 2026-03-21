@@ -1,0 +1,24 @@
+{
+    "max_tokens": {
+        "name": "触发删除的 token 上限",
+        "type": "integer",
+        "default": 5000,
+        "minimum": 1000,
+        "hint": "当会话历史新增token 数超过此值时触发删除（即不含首次人设和工具等花费）"
+    },
+    "chars_per_token": {
+        "name": "每 token 字符数",
+        "type": "number",
+        "default": 2.0,
+        "minimum": 1.0,
+        "maximum": 10.0,
+        "hint": "用于估算 token 数的系数（字符数 ÷ 此值 ≈ token 数）"
+    },
+    "check_interval_seconds": {
+        "name": "检查间隔（秒）",
+        "type": "integer",
+        "default": 60,
+        "minimum": 10,
+        "hint": "两次删除检查之间的最小间隔，避免高频操作"
+    }
+}
