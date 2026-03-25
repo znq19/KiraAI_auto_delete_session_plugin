@@ -93,9 +93,9 @@ class AutoDeleteSessionPlugin(BasePlugin):
             return
 
         try:
-            # 注意：delete_session 是同步方法，不要加 await
+            # 删除会话历史
             self.mem_mgr.delete_session(sid)
-            logger.info(f"会话 {sid} 因 token 超限 ({total_tokens} > {self.max_tokens}) 已自动删除")
-            req.messages = []  # 清空本次请求的历史
+            logger.info(f"会话 {sid} 因 token 超限 ({total_tokens} > {self.max_tokens}) 已自动删除历史")
+            # 注意：不清空 req.messages，保留当前用户消息，让 AI 基于空历史回复
         except Exception as e:
             logger.error(f"删除会话 {sid} 失败: {e}")
