@@ -1,7 +1,7 @@
 {
     "display_name": "Auto Delete Session",
     "plugin_id": "auto_delete_session",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "znq19",
     "description": "当会话新增 token 估算超过阈值时自动删除该会话，释放token和不易超限，保持回复速度。",
     "repo": null
