@@ -86,7 +86,12 @@ class AutoDeleteSessionPlugin(BasePlugin):
 
         total_tokens = 0
         for msg in messages:
-            content = msg.get("content", "")
+            # 兼容两种消息格式：字典或 OpenAIMessage 对象
+            if isinstance(msg, dict):
+                content = msg.get("content", "")
+            else:
+                # 假设对象有 content 属性
+                content = getattr(msg, "content", "")
             total_tokens += self.count_tokens(content)
 
         if total_tokens < self.max_tokens:
