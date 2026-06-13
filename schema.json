@@ -24,7 +24,7 @@
     "keep_recent_turns": {
         "name": "保留的最近轮数",
         "type": "integer",
-        "default": 10,
+        "default": 5,
         "minimum": 1,
         "maximum": 50,
         "hint": "重开后保留多少轮原始对话（每轮 user+assistant）。如果连续超限，插件会自动降级该值。"
