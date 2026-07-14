@@ -1,4 +1,7 @@
 # KiraAI_auto_delete_session_plugin/自动检测token重开对话插件
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
+
 当会话新增 token 估算超过阈值时自动删除该会话并保留最近消息轮，释放token和不易超限，保持回复速度。
 
 webui可设置阀值和估算比例、检查间隔、保留消息轮数。新增token即不含原本人设、工具注入等的花费。
