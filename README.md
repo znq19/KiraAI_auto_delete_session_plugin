@@ -1,4 +1,6 @@
-# KiraAI_auto_delete_session_plugin（ADS）/自动检测token重开对话插件 1.3.2
+# KiraAI_auto_delete_session_plugin（ADS）
+
+# 自动检测token重开对话插件 1.3.2
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
 
