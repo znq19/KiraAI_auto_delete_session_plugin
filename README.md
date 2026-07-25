@@ -1,4 +1,4 @@
-# Auto Delete Session (ADS)
+# Auto Delete Session (ADS) 2.1.0
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
 
