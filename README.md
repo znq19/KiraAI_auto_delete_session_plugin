@@ -109,7 +109,7 @@ KiraAI 的 system prompt 里通常带时间戳，每分钟变一次，导致整�
 
 正是因为 CCS 证明了"KiraAI 可以永久维护同一个会话的上下文"这条路走得通，ADS 才得以站在巨人的肩膀上，提供另外一种轻量和带有原有检测新增tokens的特色去实现它。
 
-感谢老汤圆的优秀代码和开放精神。respect 🫡
+感谢老汤圆的优秀代码和开放精神。respect
 
 - **CCS 项目地址**：[https://github.com/OldTangyuan/KiraAI-ContextCondensation](https://github.com/OldTangyuan/KiraAI-ContextCondensation)
 - **ADS 项目地址**：[https://github.com/znq19/KiraAI_auto_delete_session_plugin](https://github.com/znq19/KiraAI_auto_delete_session_plugin)
