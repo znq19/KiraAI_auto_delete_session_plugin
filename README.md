@@ -109,7 +109,7 @@ KiraAI 的 system prompt 里通常带时间戳，每分钟变一次，导致整�
 
 正是因为 CCS 证明了"KiraAI 可以永久维护同一个会话的上下文"这条路走得通，ADS 才得以站在巨人的肩膀上，提供另外一种轻量和带有原有检测新增tokens的特色去实现它。
 
-感谢老汤圆的优秀代码和开放精神。respect
+感谢老汤圆的优秀代码和开放精神。respect 🫡
 
 - **CCS 项目地址**：[https://github.com/OldTangyuan/KiraAI-ContextCondensation](https://github.com/OldTangyuan/KiraAI-ContextCondensation)
 - **ADS 项目地址**：[https://github.com/znq19/KiraAI_auto_delete_session_plugin](https://github.com/znq19/KiraAI_auto_delete_session_plugin)
@@ -150,6 +150,53 @@ A: 这正是 ADS 做了很多工作的领域：摘要固定在记忆头部位置
 **Q: 为什么 token 估算和实际有差距？**
 
 A: ADS 按 `字符数 / chars_per_token` 估算，中文默认 2.0（一个汉字约 2 token）。如果模型的分词器不同，实际 token 数会有偏差。可以微调 `chars_per_token` 参数（中文建议 1.5-2.5）。
+
+---
+
+<details>
+<summary><strong>更新日志 Changelog</strong></summary>
+
+### 2.1.0
+
+- **写穿式覆写**：默认 `write_through=true`，直接覆写会话记忆保留标题/描述元信息，告别"未命名会话"
+- **累积摘要系统**：旧摘要 + 新增量合并，非层层有损叠加；超长自动 self-compress 兜底
+- **预热压缩**：阈值 70% 时后台预生成摘要，触发时收割即用，sync 模式下几乎零阻塞
+- **时间队尾化**：将 time 段移到 user prompt 队尾，system+记忆前缀跨分钟稳定，前缀缓存完整命中
+- **持续后台合并**：三种策略（`append_then_merge` / `immediate` / `append_only`），并发可控
+- **CCS 互斥机制**：`disable_ccs` / `disable_self` / `ignore` 三种冲突策略，默认自动禁用 CCS
+- **摘要预处理**：JSON 感知压缩过长 tool 结果 + 图片描述预处理
+- **轮数检测模式**：新增 `trigger_mode=rounds` / `either`，对接框架 `max_memory_length` 窗口
+- **动态降级增强**：连续超限时 `keep_turns` 自动减半，rounds 模式下钳制为 `rounds_limit - 1`
+
+### 2.0.0
+
+- 重构核心架构：写穿式重开、累积摘要存储、后台压缩管道
+- 新增 `preprocessor.py` 摘要预处理模块
+- 新增 `compat.py` CCS 互斥处理模块
+- 从 KSM 拆分独立摘要模块 `summarizer.py`
+
+### 1.3.2
+
+- **重开前自动摘要**：sync 阻塞生成 + async 后台补写两种模式，用 LLM 压缩被删历史后注入新会话首条记忆（`[前情摘要|系统注入]`），重开后 bot 仍能衔接上文  
+- **连续降级摘要复用**：窗口内连续超限时读取上次已写入的摘要复用，避免重复调 LLM  
+- **摘要详细日志**：`enable_summary_logging` 开关，输出触发条件、复用判断、完整摘要文本等调试信息  
+- **连续超限动态降级**：短时间（检查间隔的一半内）连续超限时保留轮数自动减半（最少 1 轮），防止频繁超限后对话截得过碎  
+- **压缩重开命令 `/resum`**：整句匹配、权限控制 + 白名单、自定义占位文案（`{keep}` `{summary}` `{error}`）；命令不进入 LLM 上下文  
+- **配置分组**：新增「重开前自动摘要」和「压缩重开命令」两个配置区（摘要模式、模型、超时、输入/输出上限、提示词、详细日志开关、命令关键词、权限、自定义文案）  
+- 重构 hard reset 核心逻辑，统一 `_do_reset_with_summary()` 入口，供自动检测和手动命令共同调用  
+- 新增 `summarizer.py` 模块，与 KSM 插件的摘要模块保持同构（独立副本）
+
+### 1.2.0
+
+- 基础自动删除 / 重开功能稳定化  
+- token 估算与阈值检测、保留轮数配置  
+- 连续超限降级逻辑
+
+### 1.0.0
+
+- 首次发布：监控会话新增 token 超限后自动删除会话、保留最近 N 轮消息
+
+</details>
 
 ---
 
