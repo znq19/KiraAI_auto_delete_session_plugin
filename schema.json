@@ -1,136 +1,355 @@
 {
-    "max_tokens": {
+  "section_basic": {
+    "type": "section",
+    "name": "重开阈值",
+    "collapsed": false,
+    "fields": {
+      "max_tokens": {
         "name": "触发重开的 token 上限",
         "type": "integer",
-        "default": 5000,
+        "default": 10000,
         "minimum": 1000,
-        "hint": "当会话历史估算 token 数超过此值时触发重开"
-    },
-    "chars_per_token": {
+        "hint": "会话历史估算 token 超过此值时触发重开。"
+      },
+      "chars_per_token": {
         "name": "每 token 字符数",
         "type": "float",
-        "default": 2.0,
-        "minimum": 1.0,
-        "maximum": 10.0,
-        "hint": "用于估算 token 数（字符数 ÷ 此值）"
-    },
-    "check_interval_seconds": {
+        "default": 2,
+        "minimum": 1,
+        "maximum": 10,
+        "hint": "用字符数 ÷ 此值估算 token，中文 1.5～2.5 较常见。"
+      },
+      "check_interval_seconds": {
         "name": "检查间隔（秒）",
         "type": "integer",
         "default": 60,
         "minimum": 10,
-        "hint": "两次检查之间的最小间隔"
-    },
-    "keep_recent_turns": {
+        "hint": "两次重开检查的最小间隔。"
+      },
+      "keep_recent_turns": {
         "name": "保留的最近轮数",
         "type": "integer",
         "default": 5,
         "minimum": 1,
         "maximum": 50,
-        "hint": "重开后保留多少轮原始对话（每轮 user+assistant）。如果连续超限，插件会自动降级该值。"
-    },
-    "section_summarize": {
-        "type": "section",
-        "name": "重开前自动摘要",
-        "collapsed": false,
-        "fields": {
-            "summarize_mode": {
-                "type": "string",
-                "name": "摘要模式",
-                "default": "sync",
-                "options": ["off", "sync", "async"],
-                "hint": "off=不摘要（原行为）；sync=重开前同步生成摘要并写入新会话首部（阻塞本轮几秒，精度最高）；async=先重开不阻塞，摘要后台生成好后补写进新会话首部（重开后第一轮回复看不到摘要）。"
-            },
-            "summarize_model": {
-                "type": "model_select",
-                "name": "摘要模型",
-                "model_type": "llm",
-                "default": "",
-                "hint": "用于生成重开前摘要的模型。不选则自动回退：快速模型 → 默认模型。建议选便宜快速的小模型。"
-            },
-            "summarize_timeout_sec": {
-                "type": "float",
-                "name": "摘要超时（秒）",
-                "default": 30.0,
-                "minimum": 0.5,
-                "maximum": 300.0,
-                "hint": "sync 模式下最多等这么久；超时则放弃摘要直接重开，不影响主流程。"
-            },
-            "summarize_max_input_chars": {
-                "type": "integer",
-                "name": "摘要输入上限（字符）",
-                "default": 6000,
-                "minimum": -1,
-                "hint": "喂给摘要模型的被删历史最大字符数（从最新往前截取）。填 0 或 -1 表示无上限（前文完整压缩，token 消耗和耗时会随历史长度增长）。"
-            },
-            "summarize_max_output_chars": {
-                "type": "integer",
-                "name": "摘要输出上限（字符）",
-                "default": 3000,
-                "minimum": -1,
-                "hint": "生成摘要的最大字符数，超出则截断（防止摘要本身撑大新会话）。填 0 或 -1 表示无上限。"
-            },
-            "summarize_prompt_template": {
-                "type": "markdown",
-                "name": "摘要提示词",
-                "default": "你是聊天记忆压缩器。下面这段较早的聊天记录即将被清理,请把它压缩成一段简短摘要（200字内）,用于衔接后续对话,让你能像没有失忆一样自然地继续聊下去。\n请优先保留：\n- 正在进行或未完成的事情（话题、任务、约定、待办）\n- 重要事实（人物、关系、时间、地点、已做的决定）\n- 对方的偏好、称呼、语气和你们之间的相处方式\n时间一律写绝对日期,直接输出摘要正文,不要任何开场白、标题或解释。",
-                "hint": "可基于默认文案自由修改（如调整字数上限、补充人设相关要求）。留空则使用内置默认提示词。"
-            },
-            "enable_summary_logging": {
-                "name": "摘要详细日志",
-                "type": "switch",
-                "default": false,
-                "hint": "开启后在日志中输出摘要触发条件、复用判断、生成的完整摘要文本等详细信息（方便排查，但会增加日志量）"
-            }
-        }
-    },
-    "section_command": {
-        "type": "section",
-        "name": "压缩重开命令",
-        "collapsed": false,
-        "fields": {
-            "enable_reset_command": {
-                "type": "switch",
-                "name": "启用压缩重开命令",
-                "default": false,
-                "hint": "发送命令关键词后，立即对当前会话执行「压缩重开」：先为被清理的较早历史生成摘要，再重开会话并保留最近轮数（摘要行为受「摘要模式」控制，off = 只重开不摘要）。与 reboot 类插件的全清空不同，压缩重开会保留摘要与最近对话。默认关闭。"
-            },
-            "reset_commands": {
-                "type": "list",
-                "name": "压缩重开命令关键词",
-                "default": ["/resum"],
-                "hint": "整句匹配任一词即触发，每行一个。默认 /resum。"
-            },
-            "reset_enable_permission": {
-                "type": "switch",
-                "name": "压缩重开启用权限控制",
-                "default": false,
-                "hint": "开启后仅「压缩重开白名单」内用户可执行；关闭则不限制。"
-            },
-            "reset_allowed_users": {
-                "type": "list",
-                "name": "压缩重开白名单",
-                "default": [],
-                "hint": "允许执行压缩重开的用户 ID，每行一个。权限开启且本列表为空时，视为不限制用户。"
-            },
-            "reset_success_message": {
-                "type": "string",
-                "name": "压缩重开成功反馈",
-                "default": "✅ 本会话已压缩重开，保留最近 {keep} 轮{summary}，我们可以继续对话了！",
-                "hint": "成功时返回。可用占位符：{keep} 保留轮数，{summary} 摘要状态说明。"
-            },
-            "reset_permission_denied_message": {
-                "type": "string",
-                "name": "压缩重开权限不足反馈",
-                "default": "❌ 权限不足：您没有压缩重开会话的权限",
-                "hint": "权限不足时返回的消息。"
-            },
-            "reset_error_message": {
-                "type": "string",
-                "name": "压缩重开错误反馈",
-                "default": "❌ 压缩重开失败: {error}",
-                "hint": "发生错误时返回。可用 {error} 显示错误信息。"
-            }
-        }
+        "hint": "重开后保留多少轮原始对话（每轮 user+assistant）。连续超限时保留轮数会自动降级。"
+      }
     }
+  },
+  "section_reset": {
+    "type": "section",
+    "name": "重开方式",
+    "collapsed": false,
+    "fields": {
+      "write_through": {
+        "name": "写穿式重开（推荐）",
+        "type": "switch",
+        "default": true,
+        "hint": "开启后直接覆写会话记忆，保留标题/描述等元信息，摘要固定在记忆头部、更利于命中上下文缓存。关闭则删除会话再重建，会丢失标题。"
+      },
+      "trigger_mode": {
+        "name": "触发模式",
+        "type": "string",
+        "default": "tokens",
+        "options": [
+          "either",
+          "tokens",
+          "rounds"
+        ],
+        "hint": "tokens=估算 token 超上限触发；rounds=会话轮数达框架窗口触发；either=两者先到先触发。"
+      },
+      "trigger_rounds": {
+        "name": "rounds 触发轮数上限",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "hint": "仅 rounds/either 模式生效。填 0 自动对齐框架 max_memory_length；填具体数字则按该值触发。"
+      },
+      "move_time_to_tail": {
+        "name": "时间挪到消息尾部（缓存修复，推荐）",
+        "type": "switch",
+        "default": true,
+        "hint": "开启后将当前时间从 system prompt 移到当前消息一起发送，避免时间变化截断前缀缓存；不影响模型看到时间。"
+      }
+    }
+  },
+  "section_summarize": {
+    "type": "section",
+    "name": "重开前自动摘要",
+    "collapsed": false,
+    "fields": {
+      "summarize_mode": {
+        "type": "string",
+        "name": "摘要模式",
+        "default": "sync",
+        "options": [
+          "off",
+          "sync",
+          "async"
+        ],
+        "hint": "off=不摘要；sync=重开前同步生成摘要并写入新会话首部（精度最高，阻塞几秒）；async=先重开不阻塞，摘要后台生成后补写。"
+      },
+      "summarize_model": {
+        "type": "model_select",
+        "name": "摘要模型",
+        "model_type": "llm",
+        "default": "",
+        "hint": "用于生成重开前摘要的模型。不选则自动回退：快速模型 → 默认模型。建议选便宜快速的小模型。"
+      },
+      "summarize_timeout_sec": {
+        "type": "float",
+        "name": "摘要超时（秒）",
+        "default": 60.0,
+        "minimum": 0.5,
+        "maximum": 300,
+        "hint": "sync 模式下最多等这么久；超时则放弃摘要直接重开，不影响主流程。"
+      },
+      "summarize_max_input_chars": {
+        "type": "integer",
+        "name": "摘要输入上限（字符）",
+        "default": 10000,
+        "minimum": -1,
+        "hint": "喂给摘要模型的被删历史最大字符数（从最新往前截取）。0 或 -1 表示无上限。"
+      },
+      "summarize_max_output_chars": {
+        "type": "integer",
+        "name": "摘要输出上限（字符）",
+        "default": 5000,
+        "minimum": -1,
+        "hint": "生成摘要的最大字符数，超出则截断。0 或 -1 表示无上限。"
+      },
+      "summarize_prompt_template": {
+        "type": "markdown",
+        "name": "摘要提示词",
+        "default": "你是聊天记忆压缩器。下面这段较早的聊天记录即将被清理,请把它压缩成一段简短摘要（200字内）,用于衔接后续对话,让你能像没有失忆一样自然地继续聊下去。\n请优先保留：\n- 正在进行或未完成的事情（话题、任务、约定、待办）\n- 重要事实（人物、关系、时间、地点、已做的决定）\n- 对方的偏好、称呼、语气和你们之间的相处方式\n时间一律写绝对日期,直接输出摘要正文,不要任何开场白、标题或解释。",
+        "hint": "可基于默认文案自由修改（如调整字数上限、补充人设相关要求）。留空则使用内置默认提示词。"
+      }
+    }
+  },
+  "section_summary_cumulative": {
+    "type": "section",
+    "name": "累积摘要与模板",
+    "collapsed": false,
+    "fields": {
+      "cumulative_summary": {
+        "type": "switch",
+        "name": "累积摘要（推荐）",
+        "default": true,
+        "hint": "开启后摘要会合并旧摘要与本次被清理历史，长期重开信息损耗更小；关闭则只对本次被清理部分单独摘要。"
+      },
+      "merge_prompt_template": {
+        "type": "markdown",
+        "name": "摘要合并提示词",
+        "default": "你是聊天记忆压缩器。下面有两段材料：【旧摘要】是更早对话的已有摘要，【新增记录】是刚刚被清理的对话片段。请把它们合并成一段新的摘要（600字内），用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n请优先保留：\n- 正在进行或未完成的事情（话题、任务、约定、待办）\n- 重要事实（人物、关系、时间、地点、已做的决定）\n- 对方的偏好、称呼、语气和你们之间的相处方式\n若新旧信息冲突，以新增记录为准。时间一律写绝对日期。直接输出合并后的摘要正文，不要任何开场白、标题或解释。\n\n【旧摘要】\n{old_summary}\n\n【新增记录】\n{new_summary}",
+        "hint": "累积摘要开启时生效：旧摘要与新增量的合并模板，必须包含 {old_summary} 和 {new_summary} 占位符。留空则使用内置默认。"
+      },
+      "self_compress_prompt_template": {
+        "type": "markdown",
+        "name": "摘要自压缩提示词",
+        "default": "你是聊天记忆压缩器。下面这段对话摘要过长，请在不丢失关键信息的前提下进一步压缩（600字内），用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n优先保留：未完成的事情、重要事实（人物/关系/时间/地点/已做的决定）、对方的偏好与称呼。\n直接输出压缩后的摘要正文，不要任何开场白或解释。\n\n{summary}",
+        "hint": "累计摘要超过输出上限时的兜底压缩模板，必须包含 {summary} 占位符。留空则使用内置默认。"
+      },
+      "merge_timeout_sec": {
+        "type": "float",
+        "name": "摘要合并超时（秒）",
+        "default": 120.0,
+        "minimum": 1,
+        "maximum": 300,
+        "hint": "旧摘要与新增量合并/自压缩的超时（秒）。超时退化为拼接，避免阻塞回复。独立于摘要生成超时。"
+      }
+    }
+  },
+  "section_summary_preprocess": {
+    "type": "section",
+    "name": "摘要预处理",
+    "collapsed": false,
+    "fields": {
+      "preprocess_tool_results": {
+        "type": "switch",
+        "name": "预处理超长工具结果（推荐）",
+        "default": true,
+        "hint": "生成摘要前，先用 LLM 压缩超长工具结果/图片描述，让工具细节参与摘要。仅作用于摘要输入，不影响正式上下文。"
+      },
+      "preprocess_in_sync": {
+        "type": "switch",
+        "name": "sync 路径也做预处理",
+        "default": false,
+        "hint": "开启后 sync 重开也会先预处理超长工具结果/图片描述（更准但更慢）。持续后台压缩本身已在后台做过预处理，通常无需开启。"
+      },
+      "tool_result_max_chars": {
+        "type": "integer",
+        "name": "工具结果压缩阈值（字符）",
+        "default": 2000,
+        "minimum": 200,
+        "hint": "超过该长度的工具结果/图片描述会先压缩再喂给摘要模型。"
+      }
+    }
+  },
+  "section_summary_optimize": {
+    "type": "section",
+    "name": "摘要优化",
+    "collapsed": false,
+    "fields": {
+      "continuous_merge_strategy": {
+        "name": "持续合并策略",
+        "type": "enum",
+        "default": "append_then_merge",
+        "options": [
+          "immediate",
+          "append_then_merge",
+          "append_only"
+        ],
+        "hint": "append_then_merge=增量 delta 先两两合并，落单的不合并先拼接；触发重开时写混合版，后台继续合并拼接部分并替换记忆。immediate=持续两两合并，触发点时同步最终合并（类似 CCS）。append_only=只拼接不调用合并，超长时触发自压缩兜底。"
+      },
+      "background_merge_max_concurrent": {
+        "name": "后台合并全局并发上限",
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "hint": "限制同时运行的后台合并/自压缩任务数，避免多个会话同时抢 LLM 导致彼此超时。"
+      },
+      "background_merge_timeout_sec": {
+        "name": "后台 LLM 合并超时（秒）",
+        "type": "float",
+        "default": 120.0,
+        "minimum": 1,
+        "hint": "后台两两合并或自压缩调用 LLM 的超时时间。超时或失败会按重试间隔重试。"
+      },
+      "replace_concat_after_merge": {
+        "name": "后台合并成功后替换拼接摘要",
+        "type": "switch",
+        "default": true,
+        "hint": "开启后，后台把落单拼接部分合并成功后，会替换框架记忆中的摘要 chunk。关闭则只保留混合版，后台合并结果不落盘。"
+      },
+      "background_merge_retry_interval_sec": {
+        "name": "后台合并失败后重试间隔（秒）",
+        "type": "float",
+        "default": 30.0,
+        "minimum": 1,
+        "hint": "后台合并/自压缩失败（超时/异常/空结果）后，等待多久再重试。"
+      },
+      "background_merge_max_retries": {
+        "name": "后台合并单轮最大重试次数",
+        "type": "integer",
+        "default": 3,
+        "minimum": 0,
+        "hint": "单轮后台任务中，对同一批片段的最大重试次数。超过后放弃本次后台合并。"
+      },
+      "max_concat_summary_chars": {
+        "name": "拼接摘要超长阈值（字符）",
+        "type": "integer",
+        "default": 5000,
+        "minimum": 500,
+        "hint": "append_only 模式或拼接部分超过该长度时，触发对应兜底策略（自压缩/截断/不处理）。"
+      },
+      "concat_overflow_strategy": {
+        "name": "拼接摘要超长策略",
+        "type": "enum",
+        "default": "self_compress",
+        "options": [
+          "self_compress",
+          "truncate_fifo",
+          "none"
+        ],
+        "hint": "self_compress=后台调用 LLM 自压缩；truncate_fifo=从旧片段开始截断直到低于阈值；none=不处理。"
+      },
+      "preheat_summary": {
+        "type": "switch",
+        "name": "持续后台压缩（推荐）",
+        "default": true,
+        "hint": "token 或轮数达到下方比例后，每轮回复后都后台持续压缩被清理历史。到达上限触发重开时可直接收割摘要，大幅减少 sync 阻塞和 async 失忆。关闭则只在阈值时现场处理。"
+      },
+      "preheat_ratio": {
+        "type": "float",
+        "name": "持续压缩启动比例",
+        "default": 0.7,
+        "minimum": 0,
+        "maximum": 1,
+        "hint": "token 或轮数达到上限的该比例时开始后台持续压缩。填 0 关闭。比例越低越不容易阻塞，但 token 消耗越高。"
+      },
+      "enable_summary_logging": {
+        "name": "摘要详细日志",
+        "type": "switch",
+        "default": false,
+        "hint": "开启后在日志中输出摘要触发条件、复用判断、生成的完整摘要文本等详细信息（方便排查，但会增加日志量）。"
+      },
+      "sync_wait_timeout": {
+        "type": "float",
+        "name": "sync 模式等待后台超时（秒）",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 120,
+        "hint": "sync 模式触发重开时，最多等这么久让后台压缩完成。默认 0 表示不等待，直接写拼接版/旧摘要，由后台/async 补写完整摘要，保证请求路径不阻塞。若模型较快，可设 5-10s 让后台刚好完成时零 LLM 调用。async 模式不等待。"
+      }
+    }
+  },
+  "section_command": {
+    "type": "section",
+    "name": "压缩重开命令",
+    "collapsed": false,
+    "fields": {
+      "enable_reset_command": {
+        "type": "switch",
+        "name": "启用压缩重开命令",
+        "default": false,
+        "hint": "发送命令关键词后，立即对当前会话执行压缩重开：先为被清理的较早历史生成摘要，再重开会话并保留最近轮数。不同于 reboot 的全清空，会保留摘要与最近对话。默认关闭。"
+      },
+      "reset_commands": {
+        "type": "list",
+        "name": "压缩重开命令关键词",
+        "default": [
+          "/resum"
+        ],
+        "hint": "整句匹配任一词即触发，每行一个。默认 /resum。"
+      },
+      "reset_enable_permission": {
+        "type": "switch",
+        "name": "压缩重开启用权限控制",
+        "default": false,
+        "hint": "开启后仅「压缩重开白名单」内用户可执行；关闭则不限制。"
+      },
+      "reset_allowed_users": {
+        "type": "list",
+        "name": "压缩重开白名单",
+        "default": [],
+        "hint": "允许执行压缩重开的用户 ID，每行一个。权限开启且本列表为空时，视为不限制用户。"
+      },
+      "reset_success_message": {
+        "type": "string",
+        "name": "压缩重开成功反馈",
+        "default": "✅ 本会话已压缩重开，保留最近 {keep} 轮{summary}，我们可以继续对话了！",
+        "hint": "成功时返回。可用占位符：{keep} 保留轮数，{summary} 摘要状态说明。"
+      },
+      "reset_permission_denied_message": {
+        "type": "string",
+        "name": "压缩重开权限不足反馈",
+        "default": "❌ 权限不足：您没有压缩重开会话的权限",
+        "hint": "权限不足时返回的消息。"
+      },
+      "reset_error_message": {
+        "type": "string",
+        "name": "压缩重开错误反馈",
+        "default": "❌ 压缩重开失败: {error}",
+        "hint": "发生错误时返回。可用 {error} 显示错误信息。"
+      }
+    }
+  },
+  "section_compat": {
+    "type": "section",
+    "name": "插件兼容",
+    "collapsed": false,
+    "fields": {
+      "ccs_conflict_policy": {
+        "type": "string",
+        "name": "与上下文压缩插件（CCS）冲突策略",
+        "default": "disable_ccs",
+        "options": [
+          "disable_ccs",
+          "disable_self",
+          "ignore"
+        ],
+        "hint": "CCS 也会覆写会话记忆，并行会互相污染。disable_ccs=自动禁用 CCS；disable_self=检测到 CCS 时本插件不生效；ignore=两者并行（不推荐）。"
+      }
+    }
+  }
 }
