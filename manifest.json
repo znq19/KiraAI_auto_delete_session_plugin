@@ -3,6 +3,6 @@
     "plugin_id": "auto_delete_session",
     "version": "2.1.0",
     "author": "znq19",
-    "description": "KiraAI智能会话管理插件，token/轮数超阈值时自动压缩重开：写穿覆写、累积摘要（600字密度）、预热零阻塞、时间队尾化修复前缀缓存、与 CCS 互斥。",
+    "description": "KiraAI智能会话管理插件，token/轮数超阈值时自动压缩重开：写穿覆写、累积摘要、预热零阻塞、时间队尾化修复前缀缓存、与 CCS 互斥。",
     "repo": "https://github.com/znq19/KiraAI_auto_delete_session_plugin"
 }
