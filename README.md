@@ -1,4 +1,4 @@
-# Auto Delete Session (ADS) 2.1.0
+# Auto Delete Session (ADS) 2.1.1
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
 
@@ -156,6 +156,12 @@ A: ADS 按 `字符数 / chars_per_token` 估算，中文默认 2.0（一个汉�
 
 <details>
 <summary><strong>更新日志 Changelog</strong></summary>
+
+### 2.1.1
+
+- **兼容框架动态提示词重定位**：适配 KiraAI 新版 `dynamic_prompt_position` 机制（框架默认自行把 sessions/chat_env/time 挪到当前 user 消息并外包 `<system_reminder>`）。新框架默认配置下 ADS 自动让位；旧框架或该开关关闭时，ADS 复刻框架同款方式兑底挪动 time（原对象 + `persist=False` + reminder 包裹）
+- **修复时间格式化 bug**：原先挪动 time 时新建 Prompt 丢失 kwargs，模型实际看到的是字面量 `{time_str}`；现在移动原 Prompt 对象，时间正常格式化
+- `move_time_to_tail` 语义升级为「保证 time 以框架同款方式离开 system prompt」，默认开启不变；与 KSM 同装时幂等（先跑者生效）
 
 ### 2.1.0
 

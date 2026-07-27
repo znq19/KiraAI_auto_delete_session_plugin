@@ -48,8 +48,10 @@ class AutoDeleteSessionPlugin(BasePlugin):
             self.trigger_mode = "tokens"
         _tr = reset.get("trigger_rounds", cfg.get("trigger_rounds", 0))
         self.trigger_rounds = int(_tr if _tr is not None else 0)
-        # 缓存修复：把 time 段从 system prompt 挪到请求队尾（随当前消息），
-        # 否则时间每分钟变化会在 system 末尾截断前缀缓存，整段记忆永远不进缓存
+        # 缓存修复：保证 time 段离开 system prompt、随当前消息走（框架同款方式），
+        # 否则时间每分钟变化会在 system 末尾截断前缀缓存，整段记忆永远不进缓存。
+        # 新框架且 dynamic_position=latest_user 时框架自行重定位，插件让位；
+        # 旧框架或框架开关关闭时插件复刻框架方式兑底（原对象 + persist=False + reminder 包裹）。
         self.move_time_to_tail = bool(reset.get("move_time_to_tail", cfg.get("move_time_to_tail", True)))
 
         # 重开前摘要（兼容旧版全部在 section_summarize；新版拆分到多个分组）
@@ -308,14 +310,36 @@ class AutoDeleteSessionPlugin(BasePlugin):
             return self.trigger_rounds
         return max(1, int(getattr(self.session_mgr, "max_memory_length", 10) or 10))
 
-    @staticmethod
-    def _move_time_to_tail(req: LLMRequest) -> bool:
-        """把 time 段从 system prompt 挪到 user_prompt 最前（随当前消息）。
+    def _framework_relocates_dynamic(self) -> bool:
+        """新框架且 dynamic_position=latest_user（默认）时，框架 assemble_prompt
+        会自行把 sessions/chat_env/time 挪到当前 user 消息（原对象、kwargs 保留、
+        persist=False、<system_reminder> 包裹），插件无需再挪 time。
+        旧框架（无 DYNAMIC_PROMPT_NAMES）或用户关闭该开关时返回 False。"""
+        try:
+            from core.provider.llm_model import DYNAMIC_PROMPT_NAMES  # noqa: F401
+        except Exception:
+            return False
+        try:
+            pos = self.ctx.config.get_config(
+                "bot_config.bot.dynamic_prompt_position", "latest_user"
+            )
+        except Exception:
+            pos = "latest_user"
+        return pos == "latest_user"
 
-        system prompt 因此跨分钟稳定，前缀缓存得以覆盖整段记忆；
-        persist=False 保证时间文本不落进会话记忆。幂等：已移动则跳过。
+    def _move_time_to_tail(self, req: LLMRequest) -> bool:
+        """保证 time 段以框架同款方式离开 system prompt、随当前消息走。
+
+        - 新框架且 dynamic_position=latest_user：框架 assemble 会自行重定位
+          （位置更优、kwargs 正确），插件直接让位；
+        - 否则（旧框架或用户关闭框架开关）：插件复刻框架方式兜底——移动原
+          Prompt 对象（保留 kwargs，{time_str} 正常格式化）、persist=False
+          不落记忆、<system_reminder> 包裹插到 user_prompt 最前。
+        幂等：已移动则跳过（与 KSM 同装时，先跑者生效）。
         """
         try:
+            if self._framework_relocates_dynamic():
+                return False
             sys_prompts = getattr(req, "system_prompt", None) or []
             time_p = None
             for p in sys_prompts:
@@ -327,15 +351,22 @@ class AutoDeleteSessionPlugin(BasePlugin):
             from core.prompt_manager import Prompt
 
             sys_prompts.remove(time_p)
-            req.user_prompt.insert(
-                0,
-                Prompt(
-                    getattr(time_p, "content", "") or "",
-                    name="time",
-                    source=getattr(time_p, "source", "system") or "system",
-                    persist=False,
-                ),
-            )
+            # 复刻框架 relocate：移动原对象（kwargs 保留，时间正常格式化）
+            # + persist=False 不落记忆 + <system_reminder> 包裹
+            supports_persist = hasattr(time_p, "persist")
+            if supports_persist:
+                time_p.persist = False
+            if supports_persist:
+                req.user_prompt[:0] = [
+                    Prompt("<system_reminder>", name="dynamic_context_start",
+                           source="system", persist=False),
+                    time_p,
+                    Prompt("</system_reminder>", name="dynamic_context_end",
+                           source="system", persist=False),
+                ]
+            else:
+                # 过旧框架（无 persist 概念）：保持旧行为，仅挪 time 本体
+                req.user_prompt.insert(0, time_p)
             return True
         except Exception:
             return False
