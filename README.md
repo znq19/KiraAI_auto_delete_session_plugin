@@ -1,4 +1,4 @@
-# Auto Delete Session (ADS) 2.1.2
+# Auto Delete Session (ADS) 2.1.3
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
 
@@ -156,6 +156,16 @@ A: ADS 按 `字符数 / chars_per_token` 估算，中文默认 2.0（一个汉�
 
 <details>
 <summary><strong>更新日志 Changelog</strong></summary>
+
+### 2.1.3
+
+- **插件图标**：新增 `icon.png`（256×256），并在 `manifest.icon` 里登记，插件列表里不再是默认占位图
+- README 补齐 2.1.2 的更新日志
+
+### 2.1.2
+
+- **适配 KiraAI v2.34.2**：框架移除了 `SessionManager.max_memory_length` 实例属性（改为按 `memory_overflow_discard_count` 成批丢弃）。本插件 `_rounds_limit()` 原先读该属性，属性消失后会**静默回落到硬编码 10** —— `rounds` / `either` 模式下若把轮数填 `0`（对齐框架窗口），触发轮数会从真实窗口（例如 50）变成 10，压缩重开会明显提前。现在新增 `_host_window()`：**老属性 → `kira_config` 配置 → 框架取值方法**，逐级兜底，新旧框架都对
+- 顺带确认：`fetch_memory` / `write_memory` / `delete_session` / `get_session_info` 等接口在 v2.34.2 均未变动，写穿式覆写路径不受新截断逻辑影响
 
 ### 2.1.1
 
