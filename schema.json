@@ -192,7 +192,7 @@
     "fields": {
       "continuous_merge_strategy": {
         "name": "持续合并策略",
-        "type": "enum",
+        "type": "string",
         "default": "append_then_merge",
         "options": [
           "immediate",
@@ -244,7 +244,7 @@
       },
       "concat_overflow_strategy": {
         "name": "拼接摘要超长策略",
-        "type": "enum",
+        "type": "string",
         "default": "self_compress",
         "options": [
           "self_compress",
@@ -331,6 +331,12 @@
         "name": "压缩重开错误反馈",
         "default": "❌ 压缩重开失败: {error}",
         "hint": "发生错误时返回。可用 {error} 显示错误信息。"
+      },
+      "reset_empty_message": {
+        "type": "string",
+        "name": "压缩重开无历史反馈",
+        "default": "📭 当前会话没有可压缩的历史，无需重开",
+        "hint": "会话没有可压缩的历史时返回的消息（不执行重开）。"
       }
     }
   },
