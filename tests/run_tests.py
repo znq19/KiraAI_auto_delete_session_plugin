@@ -16,6 +16,7 @@
  11. 命令 /resum 常规回归（含钳制后保留轮数反馈）
  12. 工具/推理字段消息重置与装配回归
  13. summarize_mode=off 回归（不产生摘要、不调用 LLM）
+ 14. 摘要预处理并发化（有界并发 ≤3 / 保序 / 失败回落 / 零待处理快路径）
 
 用法：
     python tests/run_tests.py --framework /path/to/KiraAI
@@ -502,6 +503,65 @@ def main() -> int:
         flat13 = sess.fetch_memory(sid13)
         check("S13 off 模式不产生摘要", not str(flat13[0].get("content", "")).startswith("[前情摘要"))
         await plugin13.terminate()
+
+        # ---- S14 摘要预处理并发化（有界并发 / 保序 / 失败回落）----
+        prep = importlib.import_module("plugins.ads_tests.preprocessor")
+
+        class _PreprocessProbe:
+            def __init__(self):
+                self.inflight = 0
+                self.max_inflight = 0
+                self.calls = 0
+
+            async def chat(self, request, **kwargs):
+                self.inflight += 1
+                self.calls += 1
+                if self.inflight > self.max_inflight:
+                    self.max_inflight = self.inflight
+                try:
+                    await asyncio.sleep(0.08)
+                    prompt = ""
+                    for m in request.messages:
+                        c = getattr(m, "content", "")
+                        if isinstance(c, str):
+                            prompt = c
+                    if "FAILME" in prompt:
+                        raise RuntimeError("probe fail")
+                    from core.provider.llm_model import LLMResponse
+                    return LLMResponse("PSUM")
+                finally:
+                    self.inflight -= 1
+
+        probe = _PreprocessProbe()
+        long_text = "alpha beta gamma " * 120
+        msgs14 = [
+            {"role": "tool", "content": "[T1] " + long_text},
+            {"role": "user", "content": "普通用户消息"},
+            {"role": "tool", "content": "[T2] " + long_text},
+            {"role": "tool", "content": "[T3] FAILME " + long_text},
+            {"role": "user", "content": "另一个普通用户消息"},
+            {"role": "tool", "content": "[T4] " + long_text},
+            {"role": "tool", "content": "[T5] " + long_text},
+        ]
+        orig_first = msgs14[0]["content"]
+        out14 = await prep.preprocess_messages_for_summary(msgs14, 200, probe, module.logger)
+        check("S14 预处理有界并发（2..3 且确有并行）", 2 <= probe.max_inflight <= 3, f"max={probe.max_inflight}")
+        check("S14 调用次数=待处理条数（含失败项）", probe.calls == 5, f"calls={probe.calls}")
+        check("S14 未处理项原样保留且顺序不变",
+              out14[1] is msgs14[1] and out14[4] is msgs14[4] and len(out14) == len(msgs14))
+        check("S14 失败项回落原文", out14[3] is msgs14[3])
+        check("S14 处理后项为副本且带压缩后缀",
+              out14[0] is not msgs14[0] and str(out14[0].get("content", "")).endswith("（已压缩）")
+              and str(out14[6].get("content", "")).endswith("（已压缩）"))
+        check("S14 原消息未被改动", msgs14[0]["content"] == orig_first)
+
+        probe2 = _PreprocessProbe()
+        out14b = await prep.preprocess_messages_for_summary(
+            [{"role": "user", "content": "短消息"}, {"role": "tool", "content": "short"}],
+            200, probe2, module.logger,
+        )
+        check("S14 零待处理快路径（不调用 LLM、原样返回）",
+              probe2.calls == 0 and out14b[0]["content"] == "短消息" and out14b[1]["content"] == "short")
 
     asyncio.run(main_run())
 

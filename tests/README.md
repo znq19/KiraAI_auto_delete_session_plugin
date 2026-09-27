@@ -34,3 +34,4 @@ KIRA_FRAMEWORK_PATH=/path/to/KiraAI python tests/run_tests.py
 | 命令 | `/resum` 正常重开（反馈的保留轮数与实际一致）；空会话给出明确提示、不误报成功 |
 | 事件清理 | 真实 `EventBus`：清空/删除会话时累计摘要与暂存被同步丢弃；非空写入不受影响；`terminate` 后订阅干净 |
 | 生命周期 | `initialize` 后 SessionManager 就绪；重复初始化/终止无残留 |
+| 预处理并发 | 超长工具结果/图片描述有界并发（≤3）处理：保序、失败回落原文、调用次数不变、零待处理走快路径 |
