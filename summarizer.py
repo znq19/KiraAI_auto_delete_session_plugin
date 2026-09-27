@@ -20,37 +20,14 @@ from typing import Dict, List, Optional
 from core.agent.message import OpenAIMessage
 from core.provider import LLMRequest
 
-DEFAULT_SUMMARIZE_PROMPT = (
-    "你是聊天记忆压缩器。下面这段较早的聊天记录即将被清理，请把它压缩成一段简短摘要（200字内），"
-    "用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n"
-    "请优先保留：\n"
-    "- 正在进行或未完成的事情（话题、任务、约定、待办）\n"
-    "- 重要事实（人物、关系、时间、地点、已做的决定）\n"
-    "- 对方的偏好、称呼、语气和你们之间的相处方式\n"
-    "直接输出摘要正文，不要任何开场白、标题或解释。"
-)
+DEFAULT_SUMMARIZE_PROMPT = "你是聊天记忆压缩器。下面这段较早的聊天记录即将被清理,请把它压缩成一段简短摘要（200字内）,用于衔接后续对话,让你能像没有失忆一样自然地继续聊下去。\n请优先保留：\n- 正在进行或未完成的事情（话题、任务、约定、待办）\n- 重要事实（人物、关系、时间、地点、已做的决定）\n- 对方的偏好、称呼、语气和你们之间的相处方式\n时间一律写绝对日期,直接输出摘要正文,不要任何开场白、标题或解释。"
 
 # 合并提示词：旧累计摘要 + 新增量摘要 → 新累计摘要（去第三人称，保持无缝衔接风格；
 # 600 字预算对齐 CCS 的信息密度，减缓长期会话磨损）
-DEFAULT_MERGE_PROMPT = (
-    "你是聊天记忆压缩器。下面有两段材料：【旧摘要】是更早对话的已有摘要，【新增记录】是刚刚被清理的对话片段。"
-    "请把它们合并成一段新的摘要（600字内），用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n"
-    "请优先保留：\n"
-    "- 正在进行或未完成的事情（话题、任务、约定、待办）\n"
-    "- 重要事实（人物、关系、时间、地点、已做的决定）\n"
-    "- 对方的偏好、称呼、语气和你们之间的相处方式\n"
-    "若新旧信息冲突，以新增记录为准。直接输出合并后的摘要正文，不要任何开场白、标题或解释。\n\n"
-    "【旧摘要】\n{old_summary}\n\n【新增记录】\n{new_summary}"
-)
+DEFAULT_MERGE_PROMPT = "你是聊天记忆压缩器。下面有两段材料：【旧摘要】是更早对话的已有摘要，【新增记录】是刚刚被清理的对话片段。请把它们合并成一段新的摘要（600字内），用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n请优先保留：\n- 正在进行或未完成的事情（话题、任务、约定、待办）\n- 重要事实（人物、关系、时间、地点、已做的决定）\n- 对方的偏好、称呼、语气和你们之间的相处方式\n若新旧信息冲突，以新增记录为准。时间一律写绝对日期。直接输出合并后的摘要正文，不要任何开场白、标题或解释。\n\n【旧摘要】\n{old_summary}\n\n【新增记录】\n{new_summary}"
 
 # 兜底自压缩：累计摘要超过输出上限时调用（保持无缝衔接风格）
-DEFAULT_SELF_COMPRESS_PROMPT = (
-    "你是聊天记忆压缩器。下面这段对话摘要过长，请在不丢失关键信息的前提下进一步压缩（600字内），"
-    "用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n"
-    "优先保留：未完成的事情、重要事实（人物/关系/时间/地点/已做的决定）、对方的偏好与称呼。\n"
-    "直接输出压缩后的摘要正文，不要任何开场白或解释。\n\n"
-    "{summary}"
-)
+DEFAULT_SELF_COMPRESS_PROMPT = "你是聊天记忆压缩器。下面这段对话摘要过长，请在不丢失关键信息的前提下进一步压缩（600字内），用于衔接后续对话，让你能像没有失忆一样自然地继续聊下去。\n优先保留：未完成的事情、重要事实（人物/关系/时间/地点/已做的决定）、对方的偏好与称呼。\n直接输出压缩后的摘要正文，不要任何开场白或解释。\n\n{summary}"
 
 def _safe_format(template: str, mapping: dict) -> str:
     """显式占位符替换，避免摘要内容中的 { } 被 str.format 误解析。"""
@@ -114,6 +91,38 @@ def dropped_fingerprint(dropped_flat: List[dict]) -> str:
     return f"{len(dropped_flat)}:{h}"
 
 
+def message_fingerprint(msg) -> str:
+    """单条消息的内容指纹（role + 文本前 200 字符），用于锚点对齐。"""
+    if not isinstance(msg, dict):
+        return ""
+    role = str(msg.get("role") or "")
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "text":
+                parts.append(str(p.get("text") or ""))
+        text = "".join(parts)
+    else:
+        text = str(content or "")
+    h = hashlib.sha256(f"{role}|{text[:200]}".encode("utf-8")).hexdigest()[:10]
+    return f"{role}:{h}"
+
+
+def covered_anchor(msgs: List[dict]) -> list:
+    """已覆盖范围的尾部锚点：最后两条消息的指纹（不足两条时单条）。
+
+    锚点用于对齐增量压缩与重开收割：窗口滑动（框架原生截断）后，
+    先按锚点在当前记忆中定位"旧覆盖终点"，其后才是未覆盖的新增部分。
+    """
+    fps = [message_fingerprint(m) for m in (msgs or []) if message_fingerprint(m)]
+    if not fps:
+        return []
+    if len(fps) >= 2:
+        return [fps[-2], fps[-1]]
+    return [fps[-1]]
+
+
 class CumulativeSummaryStore:
     """每会话累计摘要的持久化存储（插件数据目录 JSON）。
 
@@ -157,12 +166,17 @@ class CumulativeSummaryStore:
         self._ensure_loaded()
         self._data.pop(sid, None)
 
-    def sync_with_head(self, sid: str, head_summary: str) -> str:
+    def sync_with_head(
+        self, sid: str, head_summary: str, session_has_messages: bool = True
+    ) -> str:
         """以记忆头部摘要为准对账，返回权威累计摘要。
 
         - 头部摘要与 store 一致 → 用 store（正常路径）；
         - 头部存在但与 store 不一致（外部改动）→ 采用头部版本并回写 store；
-        - 头部不存在（用户清了会话 / 摘要丢失）→ 清掉 store 条目，返回空。
+        - 头部不存在：
+            · 会话仍在继续（还有其它消息）→ 摘要头大概率被框架原生截断，
+              保留 store 作为权威累计摘要（累计信息不丢，下次重开合并后写回记忆）；
+            · 会话已空（用户清了会话 / 会话被删）→ 清掉 store 条目，返回空。
         """
         self._ensure_loaded()
         stored = self.get(sid)
@@ -171,9 +185,10 @@ class CumulativeSummaryStore:
             if stored != head_summary:
                 self.set(sid, head_summary)
             return head_summary
-        if stored:
+        if stored and not session_has_messages:
             self.pop(sid)
-        return ""
+            return ""
+        return stored or ""
 
     def save(self) -> None:
         self._ensure_loaded()
