@@ -609,6 +609,139 @@ def main() -> int:
         check("S14 零待处理快路径（不调用 LLM、原样返回）",
               probe2.calls == 0 and out14b[0]["content"] == "短消息" and out14b[1]["content"] == "short")
 
+        # ---- S15 计数补齐（2.1.7）----
+        plugin15 = Plugin(ctx, mk_cfg())
+        tc_msg = {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "1", "type": "function",
+                                  "function": {"name": "write_file",
+                                               "arguments": "{\"content\":\"" + "甲" * 400 + "\"}"}}]}
+        n_tc = plugin15.message_tokens(tc_msg)
+        check("S15 tool_calls.arguments 计入 token", n_tc >= 200, f"tokens={n_tc}")
+
+        list_msg = {"role": "user", "content": [
+            {"type": "text", "text": "图" * 500},
+            {"type": "image_url", "image_url": {"url": "x"}},
+        ]}
+        n_list = plugin15.message_tokens(list_msg)
+        check("S15 list content 只取 text 部分", 245 <= n_list <= 260, f"tokens={n_list}")
+
+        rc_msg = {"role": "assistant", "content": "hi", "reasoning_content": "思考" * 100}
+        base_msg = {"role": "assistant", "content": "hi"}
+        check("S15 reasoning_content 计入 token",
+              plugin15.message_tokens(rc_msg) > plugin15.message_tokens(base_msg))
+
+        # ---- S16 rounds / keep 钳制（2.1.7）----
+        cfg["bot_config"]["bot"]["max_memory_length"] = 10
+        plugin16 = Plugin(ctx, mk_cfg(section_basic={"keep_recent_turns": 15, "max_tokens": 999999},
+                                      section_reset={"trigger_mode": "rounds", "trigger_rounds": 20}))
+        check("S16 trigger_rounds 超窗口时钳制到窗口", plugin16._rounds_limit() == 10,
+              f"limit={plugin16._rounds_limit()}")
+        check("S16 keep 钳制到窗口-1", plugin16._clamped_keep(15) == 9,
+              f"keep={plugin16._clamped_keep(15)}")
+
+        # ---- S17 框架裁剪缓冲：剥摘要、保留轮次、重开并入摘要输入（2.1.7）----
+        sid17 = "test:dm:s17"
+        cfg["bot_config"]["bot"]["max_memory_length"] = 10
+        plugin17 = Plugin(ctx, mk_cfg(
+            section_basic={"keep_recent_turns": 2, "max_tokens": 999999},
+            section_summarize={"summarize_mode": "sync"},
+            section_summary_optimize={"continuous_merge_strategy": "immediate",
+                                      "preheat_summary": False},
+        ))
+        await plugin17.initialize()
+        await seed(sid17, 4, "s17")
+        trimmed_chunk = [
+            {"role": "user", "content": module.SUMMARY_MARKER + " 旧摘要\nOLD-SUM"},
+            {"role": "user", "content": "TRIMMED-Q"},
+            {"role": "assistant", "content": "TRIMMED-A"},
+        ]
+
+        class _TrimEvent:
+            payload = {"session": sid17, "discarded_memory": [trimmed_chunk]}
+
+        await plugin17._on_memory_updated_event(_TrimEvent())
+        buf17 = plugin17._discard_pending.get(sid17) or []
+        check("S17 裁剪缓冲剥掉摘要、保留整轮",
+              len(buf17) == 1 and buf17[0][0].get("content") == "TRIMMED-Q")
+
+        seen17: list[dict] = []
+
+        async def _capture_sum(sid, msgs, preprocess=None):
+            seen17.extend(msgs)
+            return "SUMMARY-17"
+
+        plugin17._summarize_dropped = _capture_sum
+        await plugin17._do_reset_with_summary(sid17, 2, reason="test")
+        joined17 = "\n".join(str(m.get("content", "")) for m in seen17)
+        check("S17 被裁轮次进入重开摘要输入", "TRIMMED-Q" in joined17, joined17[:80])
+        check("S17 摘要输入顺序：被裁在旧摘要之后、内存 dropped 之前",
+              joined17.find("TRIMMED-Q") > joined17.find("[更早的旧摘要") if "[更早的旧摘要" in joined17 else True)
+        check("S17 重开后缓冲清空", not plugin17._discard_pending.get(sid17))
+        await plugin17.terminate()
+
+        # ---- S18 多步回合只读一次 DB（2.1.7）----
+        sid18 = "test:dm:s18"
+        plugin18 = Plugin(ctx, mk_cfg(
+            section_basic={"max_tokens": 10 ** 9},
+            section_summary_optimize={"preheat_summary": True, "preheat_ratio": 0.7},
+        ))
+        await plugin18.initialize()
+        await seed(sid18, 2, "s18")
+        read_calls = {"n": 0}
+        _orig_read = plugin18._sm_read_flat
+
+        async def _counted_read(sid):
+            read_calls["n"] += 1
+            return await _orig_read(sid)
+
+        plugin18._sm_read_flat = _counted_read
+
+        class _StepEvent:
+            def __init__(self, sid, eid):
+                self.sid = sid
+                self.event_id = eid
+
+        ev18 = _StepEvent(sid18, "evt-18")
+        await plugin18.post_reply_continuous_compress(ev18)
+        first = read_calls["n"]
+        await plugin18.post_reply_continuous_compress(ev18)
+        check("S18 同一回合多个 step 只读一次 DB",
+              first == 1 and read_calls["n"] == 1, f"first={first} total={read_calls['n']}")
+        await plugin18.terminate()
+
+        # ---- S19 后台写回谱系校验（2.1.7）----
+        plugin19 = Plugin(ctx, mk_cfg())
+        await plugin19.initialize()
+        ok19, _ = await plugin19._apply_summary_safe("test:dm:s19", None, "STALE", gen=999)
+        check("S19 过期谱系不写回", not ok19)
+        await plugin19.terminate()
+
+        # ---- S20 重开后 pending.buf_count 归零（新裁剪不被跳过）----
+        sid20 = "test:dm:s20"
+        cfg["bot_config"]["bot"]["max_memory_length"] = 10
+        plugin20 = Plugin(ctx, mk_cfg(
+            section_basic={"keep_recent_turns": 2, "max_tokens": 999999},
+            section_summary_optimize={"continuous_merge_strategy": "append_then_merge",
+                                      "preheat_summary": True},
+        ))
+        await plugin20.initialize()
+        await seed(sid20, 4, "s20")
+        plugin20._discard_pending[sid20] = [[{"role": "user", "content": "OLD-BUF"}]]
+        plugin20._preheat_pending[sid20] = {
+            "fp": "x", "final": "PRE", "base": "", "compressed_len": 1,
+            "anchor": [], "parts": ["PRE"], "buf_count": 1,
+        }
+        await plugin20._do_reset_with_summary(sid20, 2, reason="test20")
+        pend20 = plugin20._preheat_pending.get(sid20) or {}
+        check("S20 重开后不残留旧 buf_count", pend20.get("buf_count") in (None, 0),
+              f"buf_count={pend20.get('buf_count')}")
+        plugin20._discard_pending[sid20] = [[{"role": "user", "content": "NEW-BUF"}]]
+        await plugin20._continuous_compress_run(sid20)
+        pend20b = plugin20._preheat_pending.get(sid20) or {}
+        check("S20 新裁剪进入预热", pend20b.get("buf_count") == 1,
+              f"buf_count={pend20b.get('buf_count')}")
+        await plugin20.terminate()
+
     asyncio.run(main_run())
 
     failed = [c for c in CHECKS if not c[1]]

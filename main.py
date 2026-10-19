@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import time
 from collections import defaultdict
 from typing import Any, List, Dict, Optional
@@ -223,6 +224,18 @@ class AutoDeleteSessionPlugin(BasePlugin):
         self._background_merge_tasks: Dict[str, asyncio.Task] = {}
         # 后台合并成功后等待替换框架记忆的新摘要：sid -> final_summary
         self._pending_replace: Dict[str, str] = {}
+        self._pending_replace_gen: Dict[str, int] = {}
+        # 框架原生窗口裁掉的旧 chunk（只缓冲，不单独调 LLM；重开/预热时并入摘要）
+        self._discard_pending: Dict[str, List[List[dict]]] = {}
+        # 缓冲上限（内部常量，不是用户配置）：防止阈值/窗口长期不匹配时无限增长
+        self.discard_max_chunks = 200
+        self.discard_max_chars = 200_000
+        # 已提示过"框架在裁但 token 未到阈值"的会话（只提示一次）
+        self._discard_warned: Dict[str, bool] = {}
+        # 重开谱系：后台摘要写回前校验，防止旧任务覆盖新重开
+        self._reset_gen: Dict[str, int] = {}
+        # post_reply 每回合只做一次 DB 读取 + 汇总
+        self._last_post_eid: Dict[str, str] = {}
 
     async def initialize(self):
         if hasattr(self.ctx, 'session_mgr'):
@@ -274,6 +287,8 @@ class AutoDeleteSessionPlugin(BasePlugin):
             if bus is not None:
                 bus.subscribe("session_memory_written", self._on_memory_written_event)
                 bus.subscribe("session_deleted", self._on_session_deleted_event)
+                # 框架原生窗口裁剪：把被删掉的旧 chunk 接进摘要水源
+                bus.subscribe("session_memory_updated", self._on_memory_updated_event)
                 self._event_bus = bus
         except Exception as e:
             logger.warning(f"AutoDelete: 会话事件订阅失败（不影响主流程）: {e}")
@@ -306,6 +321,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
             try:
                 bus.unsubscribe("session_memory_written", self._on_memory_written_event)
                 bus.unsubscribe("session_deleted", self._on_session_deleted_event)
+                bus.unsubscribe("session_memory_updated", self._on_memory_updated_event)
             except Exception:
                 pass
             self._event_bus = None
@@ -320,6 +336,11 @@ class AutoDeleteSessionPlugin(BasePlugin):
             tasks.clear()
         self._preheat_pending.clear()
         self._pending_replace.clear()
+        self._pending_replace_gen.clear()
+        self._discard_pending.clear()
+        self._discard_warned.clear()
+        self._reset_gen.clear()
+        self._last_post_eid.clear()
         if self._summary_store is not None:
             try:
                 self._summary_store.save()
@@ -347,6 +368,46 @@ class AutoDeleteSessionPlugin(BasePlugin):
         if sid:
             self._forget_session(sid)
 
+    async def _on_memory_updated_event(self, event):
+        """框架原生窗口裁掉了旧 chunk：只缓冲，不调 LLM、不写记忆、不改触发。
+
+        - 裁剪发生在框架 update_memory；payload["discarded_memory"] 是被删掉的 chunk；
+        - ADS 的融合布局会把"摘要"和"最旧的一轮"放进同一个 chunk0，
+          这里剥掉摘要消息、保留后面的对话消息（摘要本身由 store 负责）；
+        - 缓冲会在下一次重开时并入摘要输入，预热也会带着它一起压缩。
+        """
+        payload = getattr(event, "payload", None) or {}
+        sid = payload.get("session")
+        discarded = payload.get("discarded_memory") or []
+        if not sid or not discarded:
+            return
+        kept: List[List[dict]] = []
+        for chunk in discarded:
+            if not isinstance(chunk, list) or not chunk:
+                continue
+            if is_summary_chunk(chunk):
+                rest = list(chunk[1:])
+                if rest:
+                    kept.append(rest)
+            else:
+                kept.append(list(chunk))
+        if not kept:
+            return
+        buf = self._discard_pending.setdefault(sid, [])
+        buf.extend(kept)
+        total_chars = sum(
+            len(str(m.get("content", ""))) for c in buf for m in c if isinstance(m, dict)
+        )
+        while (len(buf) > self.discard_max_chunks or total_chars > self.discard_max_chars) and len(buf) > 1:
+            removed = buf.pop(0)
+            total_chars -= sum(
+                len(str(m.get("content", ""))) for m in removed if isinstance(m, dict)
+            )
+        logger.info(
+            f"📦 框架裁掉 {len(kept)} 个旧 chunk，已缓冲 "
+            f"({len(buf)} chunks)；将在下次重开/预热时并入摘要"
+        )
+
     def _forget_session(self, sid: str) -> None:
         """会话被清空/删除：同步清理该 sid 的累计摘要、预热暂存与后台任务。"""
         if self._summary_store is not None:
@@ -357,6 +418,11 @@ class AutoDeleteSessionPlugin(BasePlugin):
                 pass
         self._preheat_pending.pop(sid, None)
         self._pending_replace.pop(sid, None)
+        self._pending_replace_gen.pop(sid, None)
+        self._discard_pending.pop(sid, None)
+        self._discard_warned.pop(sid, None)
+        self._reset_gen.pop(sid, None)
+        self._last_post_eid.pop(sid, None)
         for tasks in (self._summary_tasks, self._preheat_tasks, self._background_merge_tasks):
             t = tasks.pop(sid, None)
             if t is not None and not t.done():
@@ -367,6 +433,44 @@ class AutoDeleteSessionPlugin(BasePlugin):
         if not isinstance(text, str):
             text = str(text)
         return max(1, int(len(text) / self.chars_per_token) + 1)
+
+    def _text_tokens(self, text: str) -> int:
+        text = text or ""
+        return int(len(text) / self.chars_per_token) + 1 if text else 0
+
+    def _content_tokens(self, content: Any) -> int:
+        if content is None:
+            return 0
+        if isinstance(content, list):
+            text = "".join(
+                str(p.get("text") or "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+            return self._text_tokens(text)
+        return self._text_tokens(str(content))
+
+    def message_tokens(self, msg: Any) -> int:
+        """一条消息实际会占用的 token（会话口径：不含 system / 工具定义）。
+
+        补齐旧实现漏掉的三块：
+          - assistant.tool_calls（arguments 会回传给模型，write_file 等可达数千 token）
+          - reasoning_content（KiraAI 的 to_dict 会带上，provider 原样发出）
+          - list content 只取 text 部分（不再 str(list) 混入结构字符）
+        每条消息再 +4 的消息框架开销（role/分隔符），与 KSM 的计数口径对齐。
+        """
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        total = self._content_tokens(content)
+
+        tcs = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+        if tcs:
+            total += self._text_tokens(json.dumps(tcs, ensure_ascii=False))
+
+        rc = msg.get("reasoning_content") if isinstance(msg, dict) else getattr(msg, "reasoning_content", "")
+        if rc:
+            total += self._text_tokens(str(rc))
+
+        return total + 4
 
     def _host_window(self) -> int:
         """框架会话窗口（chunk 数）。
@@ -392,17 +496,27 @@ class AutoDeleteSessionPlugin(BasePlugin):
             return 10
 
     def _rounds_limit(self) -> int:
-        """rounds 触发的轮数上限：配置优先，0 = 对齐框架窗口。"""
+        """rounds 触发的轮数上限：配置优先，0 = 对齐框架窗口。
+
+        trigger_rounds > 框架窗口时永远到不了（len(content) 被窗口封顶），
+        这里按窗口钳制，保证填了也一定能触发。
+        """
+        host = self._host_window()
         if self.trigger_rounds > 0:
+            if self.trigger_rounds > host:
+                logger.warning(
+                    f"trigger_rounds={self.trigger_rounds} > 框架窗口 {host}，按窗口钳制"
+                )
+                return host
             return self.trigger_rounds
-        return self._host_window()
+        return host
 
     def _clamped_keep(self, keep_turns: int) -> int:
         """keep 必须 < 框架窗口，否则重开后融合头部摘要会被框架原生截断。"""
-        cap = max(1, self._rounds_limit() - 1)
+        cap = max(1, self._host_window() - 1)
         if keep_turns > cap:
             logger.warning(
-                f"保留轮数 {keep_turns} >= 框架窗口 {self._rounds_limit()}，"
+                f"保留轮数 {keep_turns} >= 框架窗口 {self._host_window()}，"
                 f"钳制为 {cap} 防止框架截断头部摘要"
             )
             return cap
@@ -613,6 +727,77 @@ class AutoDeleteSessionPlugin(BasePlugin):
         return [
             {"role": "user", "content": f"[更早的旧摘要，供参考] {head_text}"}
         ] + list(dropped)
+
+    @staticmethod
+    def _with_overflow(
+        eff_dropped: List[dict], overflow: List[List[dict]], reused_head: bool
+    ) -> List[dict]:
+        """把被框架裁掉的 chunk 并入摘要输入。
+
+        顺序：旧摘要伪消息 → overflow（更旧）→ 内存 dropped（更新）。
+        overflow 不参与锚点定位；这里只负责最终送给 LLM 的顺序。
+        """
+        if not overflow:
+            return list(eff_dropped)
+        flat = [m for c in overflow for m in c]
+        if (
+            not reused_head
+            and eff_dropped
+            and isinstance(eff_dropped[0], dict)
+            and str(eff_dropped[0].get("content", "")).startswith("[更早的旧摘要")
+        ):
+            return [eff_dropped[0]] + flat + list(eff_dropped[1:])
+        return flat + list(eff_dropped)
+
+    async def _wait_framework_write_lock(self) -> None:
+        """等框架当前正在进行的会话写入结束（能拿到才等）。
+
+        3.0 的 update_session 是整段替换；ADS 的读不在框架 _write_lock 内，
+        可能读到 update_memory 提交前的旧快照。先等锁释放，把窗口缩到最小。
+        """
+        lock = getattr(self.session_mgr, "_write_lock", None)
+        if lock is not None:
+            try:
+                async with lock:
+                    pass
+            except Exception:
+                pass
+
+    async def _apply_summary_safe(
+        self,
+        sid: str,
+        expected_head: Optional[str],
+        new_summary: str,
+        gen: int,
+        only_if_summary_head: bool = False,
+    ) -> tuple:
+        """安全地把摘要写到记忆头部。
+
+        返回 (applied, head_now)。
+        - gen 不一致：期间又重开过，结果过期；
+        - expected_head 非 None：头部摘要必须仍等于它，否则让调用方重新合并；
+        - only_if_summary_head：头部没有摘要就不写（用于后台替换路径）。
+        """
+        if self._reset_gen.get(sid, 0) != gen:
+            return False, ""
+        await self._wait_framework_write_lock()
+        chunks = await self._sm_read_chunks(sid)
+        head_now = ""
+        if chunks and is_summary_chunk(chunks[0]):
+            head_now = extract_summary_text(str(chunks[0][0].get("content", "") or ""))
+        if expected_head is not None and head_now != (expected_head or "").strip():
+            return False, head_now
+        if only_if_summary_head and not (chunks and is_summary_chunk(chunks[0])):
+            return False, head_now
+        summary_msg = build_summary_chunk(new_summary)[0]
+        if chunks and is_summary_chunk(chunks[0]):
+            chunks[0] = [summary_msg] + list(chunks[0][1:])
+        elif chunks:
+            chunks[0] = [summary_msg] + list(chunks[0])
+        else:
+            chunks = [[summary_msg]]
+        await self._sm_write_chunks(sid, chunks)
+        return True, head_now
 
     async def _summarize_dropped(
         self, sid: str, dropped: List[dict], preprocess: Optional[bool] = None
@@ -922,6 +1107,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
                             current_pend["final"] = new_final
                             if self.replace_concat_after_merge:
                                 self._pending_replace[sid] = new_final
+                                self._pending_replace_gen[sid] = self._reset_gen.get(sid, 0)
                         if self.enable_summary_logging:
                             logger.info(
                                 f"[摘要调试] [后台合并] {sid} 成功，新摘要 {len(new_final)} 字符"
@@ -984,6 +1170,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
                         current_pend["final"] = compressed
                         if self.replace_concat_after_merge:
                             self._pending_replace[sid] = compressed
+                            self._pending_replace_gen[sid] = self._reset_gen.get(sid, 0)
                     if self.enable_summary_logging:
                         logger.info(
                             f"[摘要调试] [自压缩] {sid} 成功，"
@@ -1051,8 +1238,16 @@ class AutoDeleteSessionPlugin(BasePlugin):
                 chunks = self._clean_and_chunk(rest)
                 keep = self._dynamic_keep_turns.get(sid, self.keep_recent_turns)
                 dropped = self._dropped_flat(chunks, keep)
-                if not dropped:
-                    self._preheat_pending.pop(sid, None)
+                pending = self._preheat_pending.get(sid)
+                buf = self._discard_pending.get(sid, [])
+                buf_count = (pending or {}).get("buf_count", 0)
+                buf_len = len(buf)
+                buf_since = buf[buf_count:buf_len]
+                if not dropped and not buf_since:
+                    # 没有新内容：保留已有的 pending（可能已经包含被裁缓冲的摘要）
+                    _pend = self._preheat_pending.get(sid)
+                    if not (_pend and _pend.get("final")):
+                        self._preheat_pending.pop(sid, None)
                     return
 
                 if self.cumulative_summary and self._summary_store is not None:
@@ -1062,8 +1257,8 @@ class AutoDeleteSessionPlugin(BasePlugin):
                 else:
                     base = ""
                 eff_dropped = self._effective_dropped(head_text, dropped, reused_head=bool(base))
-                fp = dropped_fingerprint(eff_dropped)
-                pending = self._preheat_pending.get(sid)
+                buf_fp = message_fingerprint(buf[-1][-1]) if buf and buf[-1] else ""
+                fp = dropped_fingerprint(eff_dropped) + f":buf{len(buf)}:{buf_fp}"
 
                 # 已是最新：无需再压缩
                 if pending and pending.get("fp") == fp and (pending.get("base") or "") == (base or ""):
@@ -1073,14 +1268,17 @@ class AutoDeleteSessionPlugin(BasePlugin):
                 # 锚点对齐（而非位置/长度）保证框架原生窗口滑动时同样成立，
                 # 避免每轮全量重压缩整段历史。
                 is_incremental = False
-                delta_input = eff_dropped
+                delta_input = self._with_overflow(
+                    eff_dropped, buf_since, reused_head=bool(base)
+                )
                 if pending and (pending.get("base") or "") == (base or ""):
                     pos = self._locate_anchor(rest, pending.get("anchor") or [])
                     if pos >= 0:
-                        if pos + 1 >= len(dropped):
+                        mem_delta = dropped[pos + 1:]
+                        if not mem_delta and not buf_since:
                             return  # 已覆盖到 dropped 尾部，无新增内容
                         is_incremental = True
-                        delta_input = dropped[pos + 1:]
+                        delta_input = [m for c in buf_since for m in c] + mem_delta
 
                 delta = await self._summarize_dropped(
                     sid, delta_input, preprocess=self.preprocess_tool_results
@@ -1128,6 +1326,8 @@ class AutoDeleteSessionPlugin(BasePlugin):
                     "compressed_len": len(dropped),
                     "anchor": covered_anchor(dropped),
                     "parts": parts,
+                    # 预热已经覆盖到的缓冲位置；重开时只补之后的增量
+                    "buf_count": buf_len,
                 }
 
                 # 还有落单片段时，后台继续合并（append_then_merge 在触发点也会再安排）
@@ -1150,7 +1350,9 @@ class AutoDeleteSessionPlugin(BasePlugin):
 
     # ── async 模式补写 ─────────────────────────────────────────
 
-    def _schedule_async_summary(self, sid: str, dropped: List[dict]):
+    def _schedule_async_summary(
+        self, sid: str, dropped: List[dict], gen: Optional[int] = None
+    ):
         """async / append fallback 模式：重开先行（带旧累计摘要），后台生成增量并合并补写。"""
         old_task = self._summary_tasks.get(sid)
         if old_task and not old_task.done():
@@ -1160,6 +1362,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
         if old_bg and not old_bg.done():
             old_bg.cancel()
         self._preheat_pending.pop(sid, None)
+        task_gen = gen if gen is not None else self._reset_gen.get(sid, 0)
 
         async def _run():
             try:
@@ -1185,15 +1388,19 @@ class AutoDeleteSessionPlugin(BasePlugin):
                     final = await self._merge_final(sid, base, delta)
                     if not final:
                         return
-                    summary_msg = build_summary_chunk(final)[0]
-                    if chunks and is_summary_chunk(chunks[0]):
-                        # 融合布局：替换 chunk 首条摘要，保留后续消息
-                        chunks[0] = [summary_msg] + list(chunks[0][1:])
-                    elif chunks:
-                        chunks[0] = [summary_msg] + list(chunks[0])
-                    else:
-                        chunks = [[summary_msg]]
-                    await self._sm_write_chunks(sid, chunks)
+                    applied, head_now = await self._apply_summary_safe(
+                        sid, head_text, final, task_gen
+                    )
+                    if not applied and head_now and head_now != head_text:
+                        # 期间别人改了摘要头（另一次重开/reboot）：以新头为 base 再合并一次
+                        final = await self._merge_final(sid, head_now, delta)
+                        if not final:
+                            return
+                        applied, _ = await self._apply_summary_safe(
+                            sid, head_now, final, task_gen
+                        )
+                    if not applied:
+                        return
                     if self.cumulative_summary and self._summary_store is not None:
                         self._summary_store.set(sid, final)
                         self._summary_store.save()
@@ -1247,16 +1454,22 @@ class AutoDeleteSessionPlugin(BasePlugin):
         if self.enable_summary_logging:
             logger.info(f"[摘要调试] 摘要模式={self.summarize_mode}, 保留轮数={keep_turns}")
 
+        # 谱系：后台摘要写回前用它判断是否已过期
+        self._reset_gen[sid] = self._reset_gen.get(sid, 0) + 1
+        reset_gen = self._reset_gen[sid]
+
         old_flat = await self._sm_read_flat(sid)
-        logger.info(f"旧历史消息数: {len(old_flat)}")
-        if not old_flat:
+        # 框架原生窗口裁掉的旧 chunk：本次一起进摘要（不单独调 LLM）
+        overflow = [list(c) for c in self._discard_pending.get(sid, [])]
+        logger.info(f"旧历史消息数: {len(old_flat)}，框架裁剪缓冲: {len(overflow)} chunks")
+        if not old_flat and not overflow:
             logger.info(f"会话 {sid} 没有可压缩的历史，跳过重开")
             return None
 
         # 1) 剥离头部摘要（摘要不再占保留轮数）
         head_text, rest = self._split_head_summary(old_flat)
         old_chunks = self._clean_and_chunk(rest)
-        if not old_chunks:
+        if not old_chunks and not overflow:
             logger.info(f"会话 {sid} 未解析出可压缩轮次，跳过重开")
             return None
         new_chunks = self._extract_recent_chunks(old_chunks, keep_turns)
@@ -1286,8 +1499,10 @@ class AutoDeleteSessionPlugin(BasePlugin):
         final: Optional[str] = None
         delta: Optional[str] = None
         pending_used = False
-        delta_dropped: List[dict] = list(eff_dropped)
-        if eff_dropped and self.summarize_mode != "off":
+        delta_dropped: List[dict] = self._with_overflow(
+            eff_dropped, overflow, reused_head=bool(base)
+        )
+        if (eff_dropped or overflow) and self.summarize_mode != "off":
             # sync 模式：等待后台压缩完成（最多 sync_wait_timeout 秒）
             if self.summarize_mode == "sync":
                 harvested = await self._harvest_continuous_compression(sid)
@@ -1297,7 +1512,12 @@ class AutoDeleteSessionPlugin(BasePlugin):
                         final = harvested
                         pending_used = bool(final)
                         if pending_used:
-                            delta_dropped = self._delta_after_anchor(pend, rest, dropped)
+                            # 预热带走的部分（buf_count）不再重复；之后新裁的补进 delta
+                            buf_rest = overflow[pend.get("buf_count", 0):]
+                            delta_dropped = (
+                                [m for c in buf_rest for m in c]
+                                + self._delta_after_anchor(pend, rest, dropped)
+                            )
                             logger.info("♻️ 收割持续压缩摘要，本次重开零 LLM 调用")
                             if self.enable_summary_logging:
                                 logger.info(f"[摘要调试] 持续压缩摘要内容:\n{final}")
@@ -1325,7 +1545,11 @@ class AutoDeleteSessionPlugin(BasePlugin):
                     else:
                         # immediate：维持 CCS 式语义，同步生成 delta 并合并
                         delta = await self._summarize_dropped(
-                            sid, eff_dropped, preprocess=self.preprocess_in_sync
+                            sid,
+                            self._with_overflow(
+                                eff_dropped, overflow, reused_head=bool(base)
+                            ),
+                            preprocess=self.preprocess_in_sync,
                         )
             else:
                 # async 模式：直接收割已完成的结果，没完成走兜底
@@ -1334,7 +1558,11 @@ class AutoDeleteSessionPlugin(BasePlugin):
                     final = pend.get("final")
                     pending_used = bool(final)
                     if pending_used:
-                        delta_dropped = self._delta_after_anchor(pend, rest, dropped)
+                        buf_rest = overflow[pend.get("buf_count", 0):]
+                        delta_dropped = (
+                            [m for c in buf_rest for m in c]
+                            + self._delta_after_anchor(pend, rest, dropped)
+                        )
                     # append_then_merge 保留 pending 供后台继续合并
                     if self.continuous_merge_strategy == "append_then_merge":
                         parts = pend.get("parts") or []
@@ -1375,7 +1603,14 @@ class AutoDeleteSessionPlugin(BasePlugin):
             and not delta_handled_inline
         )
         if should_schedule_async:
-            self._schedule_async_summary(sid, delta_dropped)
+            self._schedule_async_summary(sid, delta_dropped, gen=reset_gen)
+        # 缓冲已进入本次摘要输入（或本次模式为 off），落盘后清空
+        self._discard_pending.pop(sid, None)
+        _pend = self._preheat_pending.get(sid)
+        if _pend is not None:
+            # 预热带走的是旧缓冲；清空后新裁剪必须从 0 重新计，
+            # 否则 append_then_merge 保留的 pending 会跳过之后的新裁剪。
+            _pend["buf_count"] = 0
 
         # append_then_merge 且确实用了 pending 时，保留 pending 供后台继续合并
         if not (pending_used and self.continuous_merge_strategy == "append_then_merge"):
@@ -1468,7 +1703,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
             # 手动重开后同样记录是否仍超预算（驱动后续自动降级）
             est = 0
             for m in new_flat:
-                est += self.count_tokens(m.get("content", ""))
+                est += self.message_tokens(m)
             self._token_still_over[sid] = est >= self.max_tokens
             has_summary = bool(new_flat) and str(
                 (new_flat[0] or {}).get("content", "")
@@ -1500,24 +1735,15 @@ class AutoDeleteSessionPlugin(BasePlugin):
         if not sid or self.session_mgr is None:
             return
         try:
-            total_tokens = 0
-            flat = await self._sm_read_flat(sid)
-            for msg in flat:
-                content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-                total_tokens += self.count_tokens(content)
-            rounds = await self._sm_count(sid)
-            if self._should_compress_continuously(sid, total_tokens, rounds):
-                self._schedule_continuous_compression(sid)
-
-            # 后台合并/自压缩成功后替换框架记忆中的摘要 chunk
+            # 后台合并/自压缩成功后替换框架记忆中的摘要 chunk（每个 step 都可能完成）
             new_summary = self._pending_replace.pop(sid, None)
             if new_summary:
+                gen = self._pending_replace_gen.pop(sid, self._reset_gen.get(sid, 0))
                 async with self._get_lock(sid):
-                    chunks = await self._sm_read_chunks(sid)
-                    if chunks and is_summary_chunk(chunks[0]):
-                        summary_msg = build_summary_chunk(new_summary)[0]
-                        chunks[0] = [summary_msg] + list(chunks[0][1:])
-                        await self._sm_write_chunks(sid, chunks)
+                    applied, _ = await self._apply_summary_safe(
+                        sid, None, new_summary, gen, only_if_summary_head=True
+                    )
+                    if applied:
                         if self.cumulative_summary and self._summary_store is not None:
                             self._summary_store.set(sid, new_summary)
                             self._summary_store.save()
@@ -1525,6 +1751,21 @@ class AutoDeleteSessionPlugin(BasePlugin):
                             f"✅ [后台合并] 会话 {sid} 摘要已替换为合并版 "
                             f"({len(new_summary)} 字符)"
                         )
+
+            # 同一回合的多个 step 只做一次 DB 读 + 汇总（多步 agent 去重）
+            eid = getattr(event, "event_id", None)
+            if eid and self._last_post_eid.get(sid) == eid:
+                return
+            if eid:
+                self._last_post_eid[sid] = eid
+
+            total_tokens = 0
+            flat = await self._sm_read_flat(sid)
+            for msg in flat:
+                total_tokens += self.message_tokens(msg)
+            rounds = await self._sm_count(sid)
+            if self._should_compress_continuously(sid, total_tokens, rounds):
+                self._schedule_continuous_compression(sid)
         except Exception as e:
             if self.enable_summary_logging:
                 logger.info(f"[摘要调试] 回复后处理异常（静默）: {e}")
@@ -1560,8 +1801,20 @@ class AutoDeleteSessionPlugin(BasePlugin):
 
                 total_tokens = 0
                 for msg in req.messages:
-                    content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-                    total_tokens += self.count_tokens(content)
+                    total_tokens += self.message_tokens(msg)
+
+                if (
+                    self._discard_pending.get(sid)
+                    and not self._discard_warned.get(sid)
+                    and self.trigger_mode in ("tokens", "either")
+                    and total_tokens < self.max_tokens
+                ):
+                    logger.warning(
+                        f"⚠️ 会话 {sid} 已被框架裁掉旧轮次，但估算 token={total_tokens} "
+                        f"仍低于阈值 {self.max_tokens}；这些轮次会在下次重开时并入摘要。"
+                        f"若希望更早重开：调低 max_tokens / 调大 max_memory_length / 改用 either"
+                    )
+                    self._discard_warned[sid] = True
 
                 rounds = await self._sm_count(sid)
                 rounds_limit = self._rounds_limit()
@@ -1618,7 +1871,7 @@ class AutoDeleteSessionPlugin(BasePlugin):
                     # 最多再降 5→2→1 两三次即收敛，不会无限空转）
                     est = 0
                     for m in new_flat:
-                        est += self.count_tokens(m.get("content", ""))
+                        est += self.message_tokens(m)
                     self._token_still_over[sid] = est >= self.max_tokens
                     if self._token_still_over[sid]:
                         logger.warning(

@@ -1,4 +1,4 @@
-# Auto Delete Session (ADS) 2.1.5
+# Auto Delete Session (ADS) 2.1.7
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/znq19/KiraAI_auto_delete_session_plugin)
 
@@ -159,12 +159,23 @@ A: 这正是 ADS 做了很多工作的领域：摘要固定在记忆头部位置
 
 **Q: 为什么 token 估算和实际有差距？**
 
-A: ADS 按 `字符数 / chars_per_token` 估算，中文默认 2.0（一个汉字约 2 token）。如果模型的分词器不同，实际 token 数会有偏差。可以微调 `chars_per_token` 参数（中文建议 1.5-2.5）。
+A: ADS 按 `字符数 / chars_per_token` 估算，只统计会话记忆（不含 system prompt 与工具定义）。默认 2.0 表示 2 字符 ≈ 1 token；实测 cl100k 下纯中文约 0.88 字符/token，所以中文为主建议 1.2–1.5，中英混合 1.8–2.2。分词器不同会有偏差，可按实际 input_tokens 校准。
 
 ---
 
 <details>
 <summary><strong>更新日志 Changelog</strong></summary>
+
+### 2.1.7
+
+- **token 计数补齐（口径不变：仍只数会话记忆，不含 system / 工具定义）**：补上 assistant 的 `tool_calls.function.arguments`、`reasoning_content`，list content 只取 `text` 部分（不再 `str(list)`），每条消息 +4 消息框架开销。实测：一条 4126 字符的 `write_file` 旧算法报 523，新算法 ≥2000；纯中文按默认 2.0 字符/token 仍会低估，中文为主建议 1.2–1.5。
+- **框架原生窗口裁剪不再无声丢失**：订阅 `session_memory_updated`，把 `discarded_memory` 只**缓冲**（不调 LLM、不写记忆、不改触发）；重开时并入摘要输入。ADS 的融合布局把摘要和最旧一轮放在同一 chunk，缓冲时会剥掉摘要消息、保留整轮。
+- **预热整合**：预热把缓冲一起压缩（`buf_count` 记录覆盖位置），重开收割时只补预热带走之后的新增部分；`buf_count == len(buf)` 时收割为零同步/零异步调用。重开后 `buf_count` 归零，新的裁剪不会被跳过。
+- **rounds / keep 钳制修正**：`trigger_rounds > 框架窗口` 按窗口钳制（不再永不触发）；`_clamped_keep` 改用真实窗口（不再用 `trigger_rounds`），避免重开后头部摘要被下一次 append 截掉。
+- **3.0 写回竞态修复**：后台摘要写回前等框架 `_write_lock` 释放 + 头部摘要校验 + 重开谱系 `gen` 校验；实测"重开 + 立即 append"3/3 丢轮的场景现在 3 chunks 完整保留。
+- **多步回合去重**：`post_reply_continuous_compress` 按 `event_id` 每回合只做一次 DB 读取 + 汇总。
+- **诊断提示**：框架已裁旧轮次但 token 未到阈值时，每会话提示一次（调低 `max_tokens` / 调大 `max_memory_length` / 改用 `either`）。
+- 集成测试 54 → **67 checks**（双世代 3.0.1 / 2.34.8 全通过）。
 
 ### 2.1.6
 

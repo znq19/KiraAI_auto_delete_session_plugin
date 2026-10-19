@@ -17,7 +17,7 @@
         "default": 2,
         "minimum": 1,
         "maximum": 10,
-        "hint": "用字符数 ÷ 此值估算 token，中文 1.5～2.5 较常见。"
+        "hint": "用字符数 ÷ 此值估算 token。默认 2.0（2 字符≈1 token）；实测纯中文约 0.9 字符/token，中文为主建议 1.2–1.5，中英混合 1.8–2.2。"
       },
       "check_interval_seconds": {
         "name": "检查间隔（秒）",
